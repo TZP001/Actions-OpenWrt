@@ -1,189 +1,239 @@
-#
-# Description: Build OpenWrt using GitHub Actions
-#
-
-name: Build OpenWrt
+name: Register Telegram App
 
 on:
-  repository_dispatch:
   workflow_dispatch:
-    inputs:
-      ssh:
-        description: 'SSH connection to Actions'
-        required: false
-        default: 'false'
-#  schedule:
-#    - cron: 0 8 * * 5
-
-env:
-  REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: master
-  FILES: lede/files
-  CONFIG_FILE: config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_COWTRANSFER: false
-  UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: true
-  TZ: Asia/Shanghai
 
 jobs:
-  build:
-    runs-on: ubuntu-20.04
+  register-telegram-app:
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@main
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-    - name: 初始化环境
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-        sudo -E apt-get -qq update
-        sudo -E apt-get -yqq install $(cat $GITHUB_WORKSPACE/depends-ubuntu-2004)
-        sudo -E apt-get -yqq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
-
-    - name: 克隆源码
-      working-directory: /workdir
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-
-    - name: 加载自定义feeds
-      run: |
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: 更新feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: 安装feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: 加载自定义脚本
-      run: |
-        #[ -e files ] && mv files openwrt/files
-        [ -e $FILES ] && mv $FILES openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-        #make defconfig
-
-    - name: SSH connection to Actions
-      uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-      env:
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-    - name: 下载编译包
-      id: package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    - name: 编译固件
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: 检查使用空间
-      if: (!cancelled())
-      run: df -hT
-
-    - name: 上传bin目录
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
+        python-version: '3.9'
 
-    - name: 打包文件
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+    - name: Install dependencies
       run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4
 
-    - name: 上传固件
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
-
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Generate release tag
-      id: tag
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: 生成release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+    - name: Wait for phone number in file
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+        REPO: 'TZP001/jdpro'
+        PHONE_NUMBER_FILE: 'jd_ddly.js'
+      run: |
+        echo "Waiting for phone number in file..."
+        while true; do
+          # Use GitHub API to fetch the file content
+          RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO/contents/$PHONE_NUMBER_FILE?$(date +%s)")
+          echo "Response content: $RESPONSE"
+          PHONE_NUMBER=$(echo "$RESPONSE")
+          if [[ "$PHONE_NUMBER" != "0" && -n "$PHONE_NUMBER" ]]; then
+            echo "Phone number received: $PHONE_NUMBER"
+            echo "PHONE_NUMBER=${PHONE_NUMBER}" >> $GITHUB_ENV
+            break
+          else
+            echo "Phone number not found or file content is '0'. Retrying in 10 seconds..."
+            sleep 10
+          fi
+        done
 
+    - name: Send login request and get RANDOM_HASH
+      env:
+        PHONE_NUMBER: ${{ env.PHONE_NUMBER }}
+      run: |
+        python - <<EOF
+        import requests
+        import os
 
-    - name: Delete workflow runs
-      uses: GitRML/delete-workflow-runs@main
-      with:
-        retain_days: 1
-        keep_minimum_runs: 5
+        phone_number = os.environ['PHONE_NUMBER']
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 6
-        delete_tags: true
+        # Step 1: Send login request to Telegram
+        response = requests.post(
+            'https://my.telegram.org/auth/send_password',
+            data={'phone': phone_number}
+        )
+        print("Login request response:", response.text)  # Print response content
+        if response.status_code != 200:
+            raise Exception('Failed to send login request')
+        random_hash = response.json()['random_hash']
+
+        # Save random_hash to GitHub environment for later use
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'RANDOM_HASH={random_hash}\n')
+
+        print('Login request sent. Check your Telegram for the login code.')
+        print(f'RANDOM_HASH: {random_hash}')
+        EOF
+
+    - name: Wait for login code in file
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+        REPO: 'TZP001/jdpro'
+        LOGIN_CODE_FILE: 'jd_3cy.js'
+      run: |
+        echo "Waiting for login code in file..."
+        while true; do
+          # Use GitHub API to fetch the file content
+          RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$REPO/contents/$LOGIN_CODE_FILE?$(date +%s)")
+          echo "Response content: $RESPONSE"
+          LOGIN_CODE=$(echo "$RESPONSE")
+          if [[ "$LOGIN_CODE" != "0" && -n "$LOGIN_CODE" ]]; then
+            echo "Login code received: $LOGIN_CODE"
+            echo "LOGIN_CODE=${LOGIN_CODE}" >> $GITHUB_ENV
+            break
+          else
+            echo "Login code not found or file content is '0'. Retrying in 10 seconds..."
+            sleep 10
+          fi
+        done
+
+    - name: Login and get session cookies
+      env:
+        PHONE_NUMBER: ${{ env.PHONE_NUMBER }}
+        RANDOM_HASH: ${{ env.RANDOM_HASH }}
+        LOGIN_CODE: ${{ env.LOGIN_CODE }}
+      run: |
+        python - <<EOF
+        import requests
+        import os
+
+        phone_number = os.environ['PHONE_NUMBER']
+        random_hash = os.environ['RANDOM_HASH']
+        login_code = os.environ['LOGIN_CODE']
+
+        # Step 2: Complete login with the login code
+        response = requests.post(
+            'https://my.telegram.org/auth/login',
+            data={
+                'phone': phone_number,
+                'random_hash': random_hash,
+                'password': login_code
+            }
+        )
+        print("Login response:", response.text)  # Print response content
+        if response.status_code != 200:
+            raise Exception('Failed to login')
+
+        # Save cookies to environment variables
+        cookies = response.cookies
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'STEL_TOKEN={cookies.get("stel_token")}\n')
+
+        print("Login successful. Cookies saved.")
+        EOF
+
+    - name: Extract hash from apps page
+      env:
+        STEL_TOKEN: ${{ env.STEL_TOKEN }}
+      run: |
+        python - <<EOF
+        import requests
+        from bs4 import BeautifulSoup
+        import os
+
+        cookies = {
+            'stel_token': os.environ['STEL_TOKEN']
+        }
+
+        # Fetch the apps page
+        response = requests.get('https://my.telegram.org/apps', cookies=cookies)
+        if response.status_code != 200:
+            raise Exception('Failed to fetch apps page')
+
+        # Parse the page content
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Extract the hash value
+        hash_input = soup.find('input', {'name': 'hash'})
+        if hash_input:
+            hash_value = hash_input['value']
+            print(f"Hash value: {hash_value}")
+            with open(os.environ['GITHUB_ENV'], 'a') as f:
+                f.write(f'HASH={hash_value}\n')
+        else:
+            raise Exception('Hash not found!')
+        EOF
+
+    - name: Create Telegram application
+      env:
+        STEL_TOKEN: ${{ env.STEL_TOKEN }}
+        HASH: ${{ env.HASH }}
+      run: |
+        python - <<EOF
+        import requests
+        import os
+
+        cookies = {
+            'stel_token': os.environ['STEL_TOKEN']
+        }
+
+        data = {
+            'hash': os.environ['HASH'],
+            'app_title': 'MyTelegramApp',
+            'app_shortname': 'myapp',
+            'app_url': '',
+            'app_platform': 'web',
+            'app_desc': 'My Telegram App Description'
+        }
+
+        # Create the application
+        response = requests.post(
+            'https://my.telegram.org/apps/create',
+            data=data,
+            cookies=cookies
+        )
+        print("Create application response:", response.text)  # Print response content
+        if response.status_code != 200:
+            raise Exception('Failed to create application')
+        print("Application created successfully!")
+        EOF
+
+    - name: Extract API ID and API Hash
+      env:
+        STEL_TOKEN: ${{ env.STEL_TOKEN }}
+      run: |
+        python - <<EOF
+        import requests
+        from bs4 import BeautifulSoup
+        import os
+
+        cookies = {
+            'stel_token': os.environ['STEL_TOKEN']
+        }
+
+        # Fetch the apps page
+        response = requests.get('https://my.telegram.org/apps', cookies=cookies)
+        if response.status_code != 200:
+            raise Exception('Failed to fetch apps page')
+
+        # Parse the page content
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Extract API ID and API Hash
+        api_id = soup.find('span', {'class': 'form-control input-xlarge uneditable-input'}).text.strip()
+        api_hash = soup.find('input', {'name': 'app_hash'})['value']
+
+        print(f"API ID: {api_id}")
+        print(f"API Hash: {api_hash}")
+
+        # Save API ID and API Hash to a file
+        with open('api_credentials.txt', 'w') as f:
+            f.write(f'API_ID={api_id}\n')
+            f.write(f'API_HASH={api_hash}\n')
+        EOF
+
+    - name: Upload API credentials as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: api-credentials
+        path: api_credentials.txt
